@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preguntas en vivo</title>
+  <link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+  <header class="barra">
+    <h1>Preguntas en vivo</h1>
+    <div class="info" id="estado">Conectando…</div>
+  </header>
+
+  <main>
+    <div id="avisos"></div>
+
+    <!-- Publicar una pregunta -->
+    <section class="tarjeta">
+      <div class="etiqueta">Nueva pregunta</div>
+      <h2>¿Qué quieres preguntar?</h2>
+      <label for="f-autor">Tu nombre (opcional)</label>
+      <input type="text" id="f-autor" maxlength="40" placeholder="Anónimo">
+      <label for="f-texto">Pregunta</label>
+      <textarea id="f-texto" maxlength="200" placeholder="Escribe tu pregunta…"></textarea>
+      <div class="contador-letras"><span id="f-cuenta">0</span> / 200</div>
+      <p></p>
+      <button id="btn-publicar" class="principal" type="button">Publicar pregunta</button>
+      <p class="nota" id="f-mensaje"></p>
+    </section>
+
+    <!-- Lista en tiempo real -->
+    <section class="tarjeta">
+      <div class="etiqueta">En vivo</div>
+      <h2>Preguntas (<span id="total">0</span>)</h2>
+      <p class="nota">Vota las que también quieres que se respondan. Solo puedes votar una vez por pregunta.</p>
+      <ol class="preguntas" id="lista"><li class="nota">Cargando…</li></ol>
+    </section>
+
+    <!-- Laboratorio de reglas de seguridad -->
+    <section class="tarjeta">
+      <details class="lab">
+        <summary>🔒 Laboratorio de reglas de seguridad</summary>
+        <p class="nota" style="margin-top:10px">Cada botón intenta hacer "trampa" directamente contra la base de datos, sin pasar por los controles de la página. Si tus reglas están bien, <b>todas las pruebas deben ser rechazadas</b>.</p>
+        <ul id="lab"></ul>
+      </details>
+    </section>
+  </main>
+
+  <script type="module">
+    import {
+      db, entrar, configuracionLista, mensajeDeError, formatearHora,
+      ordenarPreguntas, avisoSinConfiguracion
+    } from "./comun.js";
+    import {
+      collection, query, orderBy, limit, onSnapshot, addDoc, updateDoc, deleteDoc,
+      doc, serverTimestamp, increment, arrayUnion
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    const $ = (id) => document.getElementById(id);
+    let uid = null;
+    let preguntas = [];
+    let yaVistas = new Set();
+
+    // Recordar el nombre en este navegador (si el navegador lo permite)
+    try { $("f-autor").value = localStorage.getItem("autor") || ""; } catch (e) {}
+
+    $("f-texto").addEventListener("input", () => { $("f-cuenta").textContent = $("f-texto").value.length; });
+
+    if (!configuracionLista()) {
+      avisoSinConfiguracion($("avisos"));
+      $("estado").textContent = "Sin configuración";
+    } else {
+      iniciar();
+    }
+
+    async function iniciar() {
+      try {
+        const usuario = await entrar();
+        uid = usuario.uid;
+        $("estado").textContent = "Conectado";
+        escucharPreguntas();
+        construirLaboratorio();
+      } catch (e) {
+        $("estado").textContent = "Error";
+        $("avisos").innerHTML = "";
+        const div = document.createElement("div");
+        div.className = "aviso";
+        div.textContent = mensajeDeError(e);
+        $("avisos").append(div);
+      }
+    }
+
+    // ------------------------------------------------------------
+    // CONCEPTO NoSQL 1 · LEER EN TIEMPO REAL
+    // onSnapshot "escucha" la colección: cada vez que alguien crea,
+    // vota o borra una pregunta, Firestore avisa y la lista se repinta.
+    // ------------------------------------------------------------
+    function escucharPreguntas() {
+      const consulta = query(collection(db, "preguntas"), orderBy("votos", "desc"), limit(100));
+      onSnapshot(consulta, (snap) => {
+        preguntas = ordenarPreguntas(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        pintar();
+      }, (e) => {
+        $("lista").innerHTML = "";
+        const li = document.createElement("li");
+        li.className = "error";
+        li.textContent = mensajeDeError(e);
+        $("lista").append(li);
+      });
+    }
+
+    function pintar() {
+      const ol = $("lista");
+      ol.innerHTML = "";
+      $("total").textContent = preguntas.length;
+      if (preguntas.length === 0) {
+        ol.innerHTML = '<li class="nota" style="display:block">Aún no hay preguntas. ¡Sé el primero!</li>';
+        return;
+      }
+      for (const p of preguntas) {
+        const yaVote = Array.isArray(p.votantes) && p.votantes.includes(uid);
+        const li = document.createElement("li");
+        if (p.respondida) li.classList.add("respondida");
+        if (!yaVistas.has(p.id) && yaVistas.size > 0) li.classList.add("nuevo");
+
+        const votos = document.createElement("div");
+        votos.className = "votos";
+        const num = document.createElement("span"); num.className = "numero"; num.textContent = p.votos || 0;
+        const pal = document.createElement("span"); pal.className = "palabra"; pal.textContent = (p.votos === 1) ? "voto" : "votos";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = yaVote ? "✓ Votado" : "👍 Votar";
+        if (yaVote) btn.classList.add("votado");
+        btn.disabled = yaVote;
+        btn.addEventListener("click", () => votar(p.id, btn));
+        votos.append(num, pal, btn);
+
+        const cuerpo = document.createElement("div");
+        const t = document.createElement("div"); t.className = "texto-pregunta"; t.textContent = p.texto;
+        const meta = document.createElement("div"); meta.className = "meta";
+        const quien = document.createElement("span"); quien.textContent = `${p.autor || "Anónimo"} · ${formatearHora(p.fecha)}`;
+        meta.append(quien);
+        if (p.uid === uid) { const s = document.createElement("span"); s.className = "pastilla naranja"; s.textContent = "Tuya"; meta.append(s); }
+        if (p.respondida) { const s = document.createElement("span"); s.className = "pastilla verde"; s.textContent = "Respondida"; meta.append(s); }
+        cuerpo.append(t, meta);
+
+        li.append(votos, cuerpo);
+        ol.append(li);
+      }
+      yaVistas = new Set(preguntas.map(p => p.id));
+    }
+
+    // ------------------------------------------------------------
+    // CONCEPTO NoSQL 2 · CREAR UN DOCUMENTO
+    // addDoc guarda un objeto JSON en la colección "preguntas".
+    // Firestore le asigna un ID automático. No hay tablas ni columnas:
+    // el documento es el propio objeto.
+    // ------------------------------------------------------------
+    $("btn-publicar").addEventListener("click", async () => {
+      const texto = $("f-texto").value.trim();
+      const autor = $("f-autor").value.trim().slice(0, 40) || "Anónimo";
+      $("f-mensaje").className = "nota";
+      if (texto.length < 3) { $("f-mensaje").textContent = "Escribe una pregunta de al menos 3 letras."; return; }
+      $("btn-publicar").disabled = true;
+      try {
+        await addDoc(collection(db, "preguntas"), {
+          texto: texto,
+          autor: autor,
+          uid: uid,
+          votos: 0,
+          votantes: [],          // arreglo DENTRO del documento: quién ya votó
+          respondida: false,
+          fecha: serverTimestamp()  // la hora la pone el servidor
+        });
+        try { localStorage.setItem("autor", autor); } catch (e) {}
+        $("f-texto").value = "";
+        $("f-cuenta").textContent = "0";
+        $("f-mensaje").className = "nota ok";
+        $("f-mensaje").textContent = "¡Pregunta publicada!";
+      } catch (e) {
+        $("f-mensaje").className = "nota error";
+        $("f-mensaje").textContent = mensajeDeError(e);
+      } finally {
+        $("btn-publicar").disabled = false;
+      }
+    });
+
+    // ------------------------------------------------------------
+    // CONCEPTO NoSQL 3 · ACTUALIZAR SOLO ALGUNOS CAMPOS
+    // increment(1) suma 1 en el servidor, aunque voten 30 personas a la vez.
+    // arrayUnion(uid) agrega tu ID al arreglo "votantes" sin duplicarlo.
+    // No se reescribe el documento completo, solo esos dos campos.
+    // ------------------------------------------------------------
+    async function votar(id, boton) {
+      boton.disabled = true;
+      try {
+        await updateDoc(doc(db, "preguntas", id), {
+          votos: increment(1),
+          votantes: arrayUnion(uid)
+        });
+      } catch (e) {
+        boton.disabled = false;
+        alert(mensajeDeError(e));
+      }
+    }
+
+    // ------------------------------------------------------------
+    // LABORATORIO: intentos de "trampa" que las reglas deben rechazar
+    // ------------------------------------------------------------
+    function construirLaboratorio() {
+      const pruebas = [
+        {
+          nombre: "Sumar 10 votos de golpe a una pregunta",
+          correr: async () => {
+            const p = preguntas[0];
+            if (!p) return { omitida: "Primero publica al menos una pregunta." };
+            await updateDoc(doc(db, "preguntas", p.id), { votos: increment(10), votantes: arrayUnion(uid) });
+          }
+        },
+        {
+          nombre: "Votar dos veces la misma pregunta",
+          correr: async () => {
+            const p = preguntas.find(x => Array.isArray(x.votantes) && x.votantes.includes(uid));
+            if (!p) return { omitida: "Primero vota normalmente alguna pregunta y luego repite esta prueba." };
+            await updateDoc(doc(db, "preguntas", p.id), { votos: increment(1), votantes: arrayUnion(uid) });
+          }
+        },
+        {
+          nombre: "Publicar una pregunta que ya trae 1000 votos",
+          correr: async () => {
+            await addDoc(collection(db, "preguntas"), {
+              texto: "Prueba de trampa", autor: "Laboratorio", uid: uid,
+              votos: 1000, votantes: [], respondida: false, fecha: serverTimestamp()
+            });
+          }
+        },
+        {
+          nombre: "Publicar haciéndose pasar por otro usuario",
+          correr: async () => {
+            await addDoc(collection(db, "preguntas"), {
+              texto: "Prueba de suplantación", autor: "Laboratorio", uid: "otro-usuario",
+              votos: 0, votantes: [], respondida: false, fecha: serverTimestamp()
+            });
+          }
+        },
+        {
+          nombre: "Borrar una pregunta sin ser moderador",
+          correr: async () => {
+            // Se usa un ID que no existe, así la prueba nunca borra nada real.
+            await deleteDoc(doc(db, "preguntas", "prueba-de-laboratorio"));
+          }
+        },
+        {
+          nombre: "Marcar una pregunta como respondida sin ser moderador",
+          correr: async () => {
+            const p = preguntas[0];
+            if (!p) return { omitida: "Primero publica al menos una pregunta." };
+            await updateDoc(doc(db, "preguntas", p.id), { respondida: !p.respondida });
+          }
+        }
+      ];
+
+      const ul = $("lab");
+      ul.innerHTML = "";
+      for (const prueba of pruebas) {
+        const li = document.createElement("li");
+        const nombre = document.createElement("span"); nombre.textContent = prueba.nombre;
+        const btn = document.createElement("button"); btn.type = "button"; btn.className = "secundario chico"; btn.textContent = "Intentar";
+        const res = document.createElement("div"); res.className = "resultado nota";
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          res.className = "resultado nota";
+          res.textContent = "Probando…";
+          try {
+            const r = await prueba.correr();
+            if (r && r.omitida) { res.textContent = "ℹ️ " + r.omitida; }
+            else { res.className = "resultado error"; res.textContent = "⚠️ ACEPTADO: la base de datos permitió la trampa. Revisa que hayas publicado las reglas (o eres moderador)."; }
+          } catch (e) {
+            if (e && e.code === "permission-denied") {
+              res.className = "resultado ok";
+              res.textContent = "✅ RECHAZADO por las reglas de seguridad (correcto).";
+            } else {
+              res.className = "resultado error";
+              res.textContent = "Error inesperado: " + mensajeDeError(e);
+            }
+          } finally {
+            btn.disabled = false;
+          }
+        });
+        li.append(nombre, btn, res);
+        ul.append(li);
+      }
+    }
+  </script>
+</body>
+</html>

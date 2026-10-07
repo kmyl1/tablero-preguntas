@@ -1,0 +1,83 @@
+rules_version = '2';
+
+// ============================================================
+//  REGLAS DE SEGURIDAD DEL TABLERO DE PREGUNTAS
+//  Pégalas completas en:
+//  Consola de Firebase > Firestore Database > Reglas > Publicar
+// ============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ¿La persona inició sesión (aunque sea de forma anónima)?
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    // ¿Existe un documento moderadores/{su uid}?
+    function esModerador() {
+      return autenticado()
+        && exists(/databases/$(database)/documents/moderadores/$(request.auth.uid));
+    }
+
+    // ---------- moderadores/{uid} ----------
+    // Se dan de alta a mano en la consola. Cada quien solo puede
+    // consultar si él mismo es moderador. Nadie puede escribir desde la página.
+    match /moderadores/{uid} {
+      allow read: if autenticado() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // ---------- preguntas/{preguntaId} ----------
+    match /preguntas/{preguntaId} {
+
+      // Un voto válido suma exactamente 1 y agrega SOLO el uid de quien vota,
+      // y esa persona no debe haber votado antes.
+      function esVotoValido() {
+        let antes = resource.data;
+        let despues = request.resource.data;
+        return autenticado()
+          && despues.diff(antes).affectedKeys().hasOnly(['votos', 'votantes'])
+          && !(request.auth.uid in antes.votantes)
+          && despues.votos == antes.votos + 1
+          && despues.votantes.size() == antes.votantes.size() + 1
+          && request.auth.uid in despues.votantes
+          && despues.votantes.hasAll(antes.votantes)
+          && despues.votantes.size() <= 500;
+      }
+
+      // Un moderador solo puede cambiar el campo "respondida".
+      function esCambioDeModerador() {
+        return esModerador()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['respondida'])
+          && request.resource.data.respondida is bool;
+      }
+
+      // Cualquier usuario conectado puede ver las preguntas.
+      allow read: if autenticado();
+
+      // Crear: el documento debe traer exactamente estos campos,
+      // empezar con 0 votos y llevar el uid de quien la publica.
+      allow create: if autenticado()
+        && request.resource.data.keys().hasOnly(['texto', 'autor', 'uid', 'votos', 'votantes', 'respondida', 'fecha'])
+        && request.resource.data.keys().hasAll(['texto', 'autor', 'uid', 'votos', 'votantes', 'respondida', 'fecha'])
+        && request.resource.data.texto is string
+        && request.resource.data.texto.size() >= 3
+        && request.resource.data.texto.size() <= 200
+        && request.resource.data.autor is string
+        && request.resource.data.autor.size() <= 40
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.votos == 0
+        && request.resource.data.votantes is list
+        && request.resource.data.votantes.size() == 0
+        && request.resource.data.respondida == false
+        && request.resource.data.fecha == request.time;
+
+      // Actualizar: o es un voto válido, o es un moderador marcando "respondida".
+      allow update: if esVotoValido() || esCambioDeModerador();
+
+      // Eliminar: solo moderadores.
+      allow delete: if esModerador();
+    }
+  }
+}

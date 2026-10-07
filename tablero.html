@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tablero de preguntas · Proyector</title>
+  <link rel="stylesheet" href="estilos.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+</head>
+<body>
+  <header class="barra">
+    <h1>Tablero de preguntas en vivo</h1>
+    <div class="info" id="estado">Conectando…</div>
+  </header>
+
+  <main class="ancho tablero">
+    <div id="avisos"></div>
+
+    <div class="rejilla">
+      <!-- Columna izquierda: QR, cifras, datos del documento y moderador -->
+      <div>
+        <div class="qr-caja">
+          <div class="titulo-qr">Escanea y pregunta</div>
+          <img id="qr" alt="Código QR que abre la página para enviar preguntas">
+          <div class="url-sesion" id="url"></div>
+        </div>
+
+        <div class="cifras">
+          <div class="cifra"><div class="numero" id="c-preguntas">0</div><div class="texto">preguntas</div></div>
+          <div class="cifra"><div class="numero" id="c-votos">0</div><div class="texto">votos en total</div></div>
+        </div>
+
+        <div class="tarjeta">
+          <div class="etiqueta">Así se guarda en Firestore</div>
+          <p class="nota" id="ruta">Esperando actividad…</p>
+          <pre class="json" id="json">{ }</pre>
+        </div>
+
+        <div class="tarjeta">
+          <div class="etiqueta">Moderador</div>
+          <p id="mod-estado" class="nota">Revisando…</p>
+          <div class="id-usuario">
+            <span class="nota">Tu ID de usuario:</span>
+            <code id="mi-uid">…</code>
+            <button id="btn-copiar" class="secundario chico" type="button">Copiar</button>
+          </div>
+          <p class="nota" id="mod-ayuda" style="margin-top:10px"></p>
+        </div>
+      </div>
+
+      <!-- Columna derecha: preguntas en vivo -->
+      <div class="tarjeta">
+        <div class="etiqueta">En vivo · ordenadas por votos</div>
+        <h2>Preguntas del público</h2>
+        <div class="lista-scroll"><ol class="preguntas" id="lista"><li class="nota" style="display:block">Cargando…</li></ol></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import {
+      db, entrar, configuracionLista, mensajeDeError, formatearHora,
+      ordenarPreguntas, aJson, avisoSinConfiguracion
+    } from "./comun.js";
+    import {
+      collection, query, orderBy, limit, onSnapshot, doc, updateDoc, deleteDoc
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    const $ = (id) => document.getElementById(id);
+    let uid = null;
+    let esModerador = false;
+    let preguntas = [];
+    let resaltar = null;
+
+    // QR que apunta a index.html en la misma carpeta del sitio
+    const urlPublico = new URL("index.html", location.href).toString();
+    $("url").textContent = urlPublico;
+    const qr = qrcode(0, "M");
+    qr.addData(urlPublico);
+    qr.make();
+    $("qr").src = qr.createDataURL(10, 2);
+
+    if (!configuracionLista()) {
+      avisoSinConfiguracion($("avisos"));
+      $("estado").textContent = "Sin configuración";
+    } else {
+      iniciar();
+    }
+
+    async function iniciar() {
+      try {
+        const usuario = await entrar();
+        uid = usuario.uid;
+        $("mi-uid").textContent = uid;
+        $("estado").textContent = "Conectado";
+        escucharModerador();
+        escucharPreguntas();
+      } catch (e) {
+        $("estado").textContent = "Error";
+        const div = document.createElement("div");
+        div.className = "aviso";
+        div.textContent = mensajeDeError(e);
+        $("avisos").append(div);
+      }
+    }
+
+    // ¿Existe el documento moderadores/{mi uid}? Se escucha en vivo:
+    // en cuanto lo crees en la consola de Firebase, esta página lo detecta.
+    function escucharModerador() {
+      onSnapshot(doc(db, "moderadores", uid), (d) => {
+        esModerador = d.exists();
+        if (esModerador) {
+          $("mod-estado").innerHTML = '<span class="pastilla verde">Eres moderador</span> Puedes marcar preguntas como respondidas y eliminarlas.';
+          $("mod-ayuda").textContent = "";
+        } else {
+          $("mod-estado").innerHTML = '<span class="pastilla">No eres moderador</span>';
+          $("mod-ayuda").innerHTML = 'Para moderar, en la consola de Firebase crea la colección <code>moderadores</code> con un documento cuyo <b>ID</b> sea tu ID de usuario. Esta página se actualizará sola.';
+        }
+        pintar();
+      }, (e) => {
+        $("mod-estado").textContent = mensajeDeError(e);
+      });
+    }
+
+    function escucharPreguntas() {
+      const consulta = query(collection(db, "preguntas"), orderBy("votos", "desc"), limit(100));
+      onSnapshot(consulta, (snap) => {
+        // docChanges() dice QUÉ cambió: added (nuevo), modified (votos/respondida), removed (borrado)
+        for (const cambio of snap.docChanges()) {
+          if (cambio.type === "added" || cambio.type === "modified") {
+            mostrarJson(cambio.doc, cambio.type);
+            resaltar = cambio.doc.id;
+          } else if (cambio.type === "removed") {
+            $("ruta").textContent = `Documento eliminado: preguntas / ${cambio.doc.id}`;
+            $("json").textContent = "(ya no existe)";
+          }
+        }
+        preguntas = ordenarPreguntas(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        pintar();
+      }, (e) => {
+        $("lista").innerHTML = "";
+        const li = document.createElement("li");
+        li.className = "error"; li.style.display = "block";
+        li.textContent = mensajeDeError(e);
+        $("lista").append(li);
+      });
+    }
+
+    function mostrarJson(d, tipo) {
+      const etiqueta = tipo === "added" ? "Nuevo documento" : "Documento modificado";
+      $("ruta").textContent = `${etiqueta}: preguntas / ${d.id}`;
+      $("json").textContent = aJson(d.data());
+    }
+
+    function pintar() {
+      const ol = $("lista");
+      ol.innerHTML = "";
+      $("c-preguntas").textContent = preguntas.length;
+      $("c-votos").textContent = preguntas.reduce((s, p) => s + (p.votos || 0), 0);
+      if (preguntas.length === 0) {
+        ol.innerHTML = '<li class="nota" style="display:block">Aún no hay preguntas. Escanea el QR para enviar la primera.</li>';
+        return;
+      }
+      for (const p of preguntas) {
+        const li = document.createElement("li");
+        if (p.respondida) li.classList.add("respondida");
+        if (p.id === resaltar) li.classList.add("nuevo");
+
+        const votos = document.createElement("div"); votos.className = "votos";
+        const num = document.createElement("span"); num.className = "numero"; num.textContent = p.votos || 0;
+        const pal = document.createElement("span"); pal.className = "palabra"; pal.textContent = (p.votos === 1) ? "voto" : "votos";
+        votos.append(num, pal);
+
+        const cuerpo = document.createElement("div");
+        const t = document.createElement("div"); t.className = "texto-pregunta"; t.textContent = p.texto;
+        const meta = document.createElement("div"); meta.className = "meta";
+        const quien = document.createElement("span"); quien.textContent = `${p.autor || "Anónimo"} · ${formatearHora(p.fecha)}`;
+        meta.append(quien);
+        if (p.respondida) { const s = document.createElement("span"); s.className = "pastilla verde"; s.textContent = "Respondida"; meta.append(s); }
+        cuerpo.append(t, meta);
+
+        if (esModerador) {
+          const acc = document.createElement("div"); acc.className = "acciones-mod";
+          const b1 = document.createElement("button"); b1.type = "button"; b1.className = "secundario chico";
+          b1.textContent = p.respondida ? "Marcar pendiente" : "✓ Marcar respondida";
+          b1.addEventListener("click", () => cambiarRespondida(p));
+          const b2 = document.createElement("button"); b2.type = "button"; b2.className = "peligro chico"; b2.textContent = "Eliminar";
+          b2.addEventListener("click", () => eliminar(p));
+          acc.append(b1, b2);
+          cuerpo.append(acc);
+        }
+
+        li.append(votos, cuerpo);
+        ol.append(li);
+      }
+    }
+
+    // CONCEPTO NoSQL · actualizar un solo campo (solo moderadores, lo exigen las reglas)
+    async function cambiarRespondida(p) {
+      try { await updateDoc(doc(db, "preguntas", p.id), { respondida: !p.respondida }); }
+      catch (e) { alert(mensajeDeError(e)); }
+    }
+
+    // CONCEPTO NoSQL · eliminar un documento (solo moderadores)
+    async function eliminar(p) {
+      if (!confirm(`¿Eliminar la pregunta "${p.texto}"?`)) return;
+      try { await deleteDoc(doc(db, "preguntas", p.id)); }
+      catch (e) { alert(mensajeDeError(e)); }
+    }
+
+    $("btn-copiar").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(uid || ""); $("btn-copiar").textContent = "¡Copiado!"; }
+      catch (e) { $("btn-copiar").textContent = "Selecciónalo y copia"; }
+      setTimeout(() => { $("btn-copiar").textContent = "Copiar"; }, 2000);
+    });
+  </script>
+</body>
+</html>
