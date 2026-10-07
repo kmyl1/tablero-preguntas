@@ -13,10 +13,10 @@
 // Estos datos son públicos por diseño: la seguridad real está
 // en las reglas de Firestore (archivo firestore.rules).
 export const firebaseConfig = {
-  apiKey: "PEGA_AQUI_TU_API_KEY",
-  authDomain: "TU-PROYECTO.firebaseapp.com",
-  projectId: "TU-PROYECTO",
-  storageBucket: "TU-PROYECTO.firebasestorage.app",
-  messagingSenderId: "000000000000",
-  appId: "1:000000000000:web:0000000000000000"
+  apiKey: "AIzaSyBfZqffR9r_Qr6ZQPRN1BHd5X_-FDCbHhE",
+  authDomain: "equipo-3-eda72.firebaseapp.com",
+  projectId: "equipo-3-eda72",
+  storageBucket: "equipo-3-eda72.firebasestorage.app",
+  messagingSenderId: "177450878326",
+  appId: "1:177450878326:web:96d12861c0607772d06657"
 };
